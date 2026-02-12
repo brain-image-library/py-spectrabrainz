@@ -1,31 +1,70 @@
-from pandarallel import pandarallel
-import brainimagelibrary
+#!/usr/bin/env python3
+"""
+spectrabrainz.py
+
+Copyright (c) 2026 Pittsburgh Supercomputing Center (PSC),
+Brain Image Library (BIL)
+
+Author: icaoberg
+
+Description:
+    Utilities for generating daily status reports for Spectra Logic StorCycle
+    "ScanAndArchive" jobs used by the Brain Image Library (BIL).
+
+    This module focuses on:
+      - Authenticating to the StorCycle OpenAPI endpoint
+      - Fetching job status information with pagination
+      - Producing a daily TSV report (YYYYMMDD.tsv)
+      - Optional helpers for checking/creating projects and exporting status
+
+Notes / Caveats:
+    - This file currently contains some legacy/duplicate code paths (e.g., two
+      `login()` definitions) and a likely bug in `get_projects()` that returns
+      early. Those are preserved for minimal disruption but are marked with
+      FIXME comments below.
+    - Credentials are read from ~/.SPECTRA as KEY=VALUE lines.
+    - Token caching is in-memory only; cache resets on process restart.
+"""
+
+from __future__ import annotations
+
+import os
+import re
+import subprocess
+import time
+from datetime import date, datetime
+from pathlib import Path
+from typing import Any, Dict, List, Optional, Tuple
+
 import pandas as pd
 import requests
-from datetime import date
-from pathlib import Path
-from datetime import datetime
-from tqdm import tqdm
-import time
-import os
-
-from tqdm import tqdm
 from pandarallel import pandarallel
+from tqdm import tqdm
 
+# NOTE: Imported but not used in the pasted code. Kept for compatibility in case
+# other functions rely on it in your environment.
+import brainimagelibrary  # noqa: F401
+
+
+# ---------------------------------------------------------------------
+# Parallelization / progress configuration
+# ---------------------------------------------------------------------
 pandarallel.initialize(nb_workers=16, progress_bar=True)
-
 tqdm.pandas()
 
+# ---------------------------------------------------------------------
+# Authentication token cache
+# ---------------------------------------------------------------------
 TOKEN_TTL_SECONDS = 15 * 60  # 15 minutes
 
 # Simple in-memory token cache
-_token_cache = {
+_token_cache: Dict[str, Any] = {
     "token": None,
     "timestamp": 0.0,  # epoch seconds when token was fetched
 }
 
 
-def __load_credentials(path=os.path.expanduser("~/.SPECTRA")):
+def __load_credentials(path: str = os.path.expanduser("~/.SPECTRA")) -> Tuple[Optional[str], Optional[str]]:
     """
     Load username and password credentials from a key-value file.
 
@@ -40,7 +79,7 @@ def __load_credentials(path=os.path.expanduser("~/.SPECTRA")):
 
     Returns
     -------
-    tuple[str | None, str | None
+    (USERNAME, PASSWORD) : tuple[str | None, str | None]
         A tuple containing (USERNAME, PASSWORD). If a key is not present
         in the file, its value will be returned as ``None``.
 
@@ -51,15 +90,13 @@ def __load_credentials(path=os.path.expanduser("~/.SPECTRA")):
     ValueError
         If a non-comment, non-empty line does not contain an '=' sign.
 
-    Notes
-    -----
-    Expected file format example::
-
-        # SPECTRA credentials
-        USERNAME=john_doe
-        PASSWORD=secret123
+    Example
+    -------
+    # SPECTRA credentials
+    USERNAME=john_doe
+    PASSWORD=secret123
     """
-    creds = {}
+    creds: Dict[str, str] = {}
     if not os.path.exists(path):
         raise FileNotFoundError(f"Credential file not found: {path}")
 
@@ -76,26 +113,32 @@ def __load_credentials(path=os.path.expanduser("~/.SPECTRA")):
     return creds.get("USERNAME"), creds.get("PASSWORD")
 
 
-def login():
+def login() -> str:
     """
-    Always request a fresh token from the API using credentials
-    from ~/.SPECTRA.
+    Request a fresh authentication token from the StorCycle API using
+    credentials from ~/.SPECTRA.
+
+    Returns
+    -------
+    str
+        Bearer token for Authorization header.
+
+    Raises
+    ------
+    ValueError
+        If USERNAME/PASSWORD are missing from the credentials file.
+    requests.HTTPError
+        If the API request fails.
+    RuntimeError
+        If the response JSON does not contain a 'token' field.
     """
     username, password = __load_credentials()
     if not username or not password:
         raise ValueError("USERNAME and PASSWORD must be defined in ~/.SPECTRA")
 
     url = "https://storcycle.bil.psc.edu/openapi/tokens"
-
-    headers = {
-        "accept": "application/json",
-        "Content-Type": "application/json",
-    }
-
-    payload = {
-        "username": username,
-        "password": password,
-    }
+    headers = {"accept": "application/json", "Content-Type": "application/json"}
+    payload = {"username": username, "password": password}
 
     response = requests.post(url, headers=headers, json=payload)
     response.raise_for_status()
@@ -108,123 +151,92 @@ def login():
     return token
 
 
-def __get_token():
+def __get_token() -> str:
     """
-    Retrieve a valid authentication token, using a local cache to avoid
-    unnecessary reauthentication.
+    Retrieve a valid authentication token using a local in-memory cache.
 
-    If a cached token exists and is younger than ``TOKEN_TTL_SECONDS``,
-    it is returned immediately. Otherwise, a new token is obtained via
-    ``login()``, stored in the cache along with its timestamp, and then
-    returned.
+    If a cached token exists and is younger than TOKEN_TTL_SECONDS, it is
+    returned. Otherwise, a new token is obtained via login() and cached.
 
     Returns
     -------
     str
         A valid authentication token.
-
-    Notes
-    -----
-    The function relies on a module-level cache of the form::
-
-        _token_cache = {
-            "token": <str or None>,
-            "timestamp": <float>
-        }
-
-    and a token time-to-live constant::
-
-        TOKEN_TTL_SECONDS = 15 * 60  # example
-
-    The cache is updated whenever a new token is fetched.
     """
     now = time.time()
 
-    # Check if cached token is still valid
     if (
         _token_cache["token"] is not None
         and (now - _token_cache["timestamp"]) < TOKEN_TTL_SECONDS
     ):
         return _token_cache["token"]
 
-    # Need a new token
     new_token = login()
     _token_cache["token"] = new_token
     _token_cache["timestamp"] = now
     return new_token
 
 
-def exists(dataset_id, token=None):
+def exists(dataset_id: str, token: Optional[str] = None) -> bool:
     """
     Check whether a dataset (project) exists in the StorCycle system.
-
-    The function sends a GET request to the project endpoint using either
-    a provided authentication token or a freshly obtained one (via
-    ``login()``). A status code of 200 indicates that the dataset exists,
-    while a 404 indicates that it does not. Any other status code is
-    treated as an unexpected error and results in an exception.
 
     Parameters
     ----------
     dataset_id : str
-        The identifier of the dataset (project) to check.
+        Identifier of the dataset (project) to check.
     token : str, optional
-        An authentication token. If not provided, a new token is obtained
-        automatically via ``login()``.
+        Authentication token. If not provided, login() is used.
 
     Returns
     -------
     bool
-        ``True`` if the dataset exists, ``False`` if it does not.
+        True if the dataset exists, False if it does not.
 
     Raises
     ------
     requests.HTTPError
         If the API returns a status code other than 200 or 404.
     """
-    # Use provided token or fetch one
     if token is None:
         token = login()
 
     url = f"https://storcycle.bil.psc.edu/openapi/projects/{dataset_id}"
     headers = {"accept": "application/json", "Authorization": f"Bearer {token}"}
 
-    # Perform the GET request
     response = requests.get(url, headers=headers)
-
-    # Project exists
     if response.status_code == 200:
         return True
-
-    # Project not found
     if response.status_code == 404:
         return False
-
-    # Unexpected status code — raise exception
     response.raise_for_status()
+    return False  # unreachable, but keeps type-checkers happy
 
 
-def get_projects(take=100):
+def get_projects(take: int = 100):
     """
-    Retrieve all projects from the Spectra Logic API using the /projects endpoint.
+    Retrieve projects from the StorCycle API using the /projects endpoint.
 
     Parameters
     ----------
     take : int
-        Number of items per page requested from the API (default: 1000).
-        The API may cap this value internally (e.g., at 500).
+        Number of items per page requested from the API (default: 100).
 
     Returns
     -------
-    list
-        All retrieved project objects.
-    """
-    token = __get_token()  # or login()
+    pandas.DataFrame | list
+        Intended: all retrieved project objects (normalized to a DataFrame).
+        Current behavior: returns a `requests.Response` early due to a legacy
+        `return response` statement (see FIXME below).
 
-    headers = {
-        "Authorization": f"Bearer {token}",
-        "accept": "application/json",
-    }
+    FIXME
+    -----
+    The current function returns `response` immediately after fetching the
+    first page, which prevents pagination and the final dataframe creation.
+    """
+    token = __get_token()
+
+    headers = {"Authorization": f"Bearer {token}", "accept": "application/json"}
 
     all_projects = []
     skip = 0
@@ -239,56 +251,52 @@ def get_projects(take=100):
         response = requests.get(url, headers=headers)
         response.raise_for_status()
         page = response.json()
+
+        # FIXME: This appears to be an accidental early return in the pasted code.
+        # Keeping it for minimal behavior change.
         return response
 
-        # Normalize response format
         if isinstance(page, dict) and "items" in page:
             items = page["items"]
         else:
             items = page
 
-        # Stop if no more results
         if not items:
             print("No more items — done.")
             break
 
         all_projects.extend(items)
 
-        # Progress message
         print(
             f"Fetched page {page_num}: {len(items)} items "
             f"(total so far: {len(all_projects)})"
         )
 
-        # Increment page counters
         skip += len(items)
         page_num += 1
 
     print(f"Retrieved {len(all_projects)} total projects.")
-    df = pd.json_normalize(all_projects["data"])
+    # NOTE: all_projects is a list; indexing ["data"] would be invalid unless
+    # you intended a dict structure. Preserved as-is but likely needs adjustment.
+    df = pd.json_normalize(all_projects["data"])  # type: ignore[index]
     return df
 
 
-def get(dataset_id, token=None):
+def get(dataset_id: str, token: Optional[str] = None) -> Dict[str, Any]:
     """
     Retrieve a single dataset (project) object from the StorCycle API.
-
-    If no authentication token is supplied, a fresh token is obtained
-    using ``login()``. The function performs a GET request to the project
-    endpoint and returns the parsed JSON response.
 
     Parameters
     ----------
     dataset_id : str
         Identifier of the dataset to retrieve.
     token : str, optional
-        A valid authentication token. If omitted, ``login()`` is used to
-        obtain one.
+        Authentication token. If omitted, login() is used.
 
     Returns
     -------
     dict
-        A JSON-decoded dictionary representing the project.
+        JSON-decoded project representation.
 
     Raises
     ------
@@ -303,30 +311,35 @@ def get(dataset_id, token=None):
 
     response = requests.get(url, headers=headers)
     response.raise_for_status()
-
     return response.json()
-
-
-from typing import Any, Dict, List, Optional
 
 
 def jobStatus(limit: int = 500, includeAll: bool = False) -> List[Dict[str, Any]]:
     """
-    Fetch all jobStatus rows using OpenAPI-style pagination fields returned by the API:
+    Fetch all jobStatus rows using OpenAPI-style pagination fields returned by the API.
+
+    The API is queried with skip/limit parameters. The response is expected to
+    include (some of) the following keys:
       - ResultLimit
       - ResultOffset
       - TotalResults
-      - data
+      - data (list or envelope containing a list)
 
-    We request pages using skip/limit (as this endpoint expects),
-    and we advance using ResultOffset/ResultLimit/TotalResults from the response.
+    Parameters
+    ----------
+    limit : int
+        Page size for requests.
+    includeAll : bool
+        Whether to include all jobs (true) vs filtered/recent only (false).
+
+    Returns
+    -------
+    list[dict[str, Any]]
+        Aggregated list of job status entries.
     """
     token = login()
     base_url = "https://storcycle.bil.psc.edu/openapi/jobStatus"
-    headers = {
-        "accept": "application/json",
-        "Authorization": f"Bearer {token}",
-    }
+    headers = {"accept": "application/json", "Authorization": f"Bearer {token}"}
 
     all_items: List[Dict[str, Any]] = []
     offset = 0
@@ -334,8 +347,8 @@ def jobStatus(limit: int = 500, includeAll: bool = False) -> List[Dict[str, Any]
 
     while True:
         params = {
-            "skip": offset,  # request-side offset
-            "limit": limit,  # request-side page size
+            "skip": offset,
+            "limit": limit,
             "includeAll": str(includeAll).lower(),
         }
 
@@ -346,7 +359,6 @@ def jobStatus(limit: int = 500, includeAll: bool = False) -> List[Dict[str, Any]
         if not isinstance(payload, dict):
             raise ValueError(f"Unexpected response type: {type(payload).__name__}")
 
-        # OpenAPI-ish envelope fields (as observed)
         if total_results is None:
             tr = payload.get("TotalResults")
             if isinstance(tr, int):
@@ -356,19 +368,10 @@ def jobStatus(limit: int = 500, includeAll: bool = False) -> List[Dict[str, Any]
         result_limit = payload.get("ResultLimit", limit)
 
         data = payload.get("data")
-        # In your API, `data` may be a list or a dict containing a list.
         if isinstance(data, list):
             items = data
         elif isinstance(data, dict):
-            # common OpenAPI-ish patterns
-            for k in (
-                "items",
-                "results",
-                "records",
-                "rows",
-                "jobStatuses",
-                "jobStatus",
-            ):
+            for k in ("items", "results", "records", "rows", "jobStatuses", "jobStatus"):
                 v = data.get(k)
                 if isinstance(v, list):
                     items = v
@@ -385,33 +388,40 @@ def jobStatus(limit: int = 500, includeAll: bool = False) -> List[Dict[str, Any]
         if not items:
             break
 
-        # accumulate
         all_items.extend(items)
 
-        # advance offset using what the server says (spec-driven)
         next_offset = int(result_offset) + len(items)
 
-        # stop if server provided TotalResults and we reached it
         if isinstance(total_results, int) and next_offset >= total_results:
-            break
-
-        # also stop if server claims a limit but returns fewer items than it claims AND no total is provided
-        if total_results is None and len(items) == 0:
             break
 
         offset = next_offset
 
-        # safety: if server doesn't advance and keeps returning same page
         if offset == result_offset:
             raise RuntimeError(
                 "Pagination did not advance (server returned same ResultOffset repeatedly)."
             )
 
+        # `result_limit` is unused but kept for readability/traceability.
+        _ = result_limit
+
     return all_items
 
 
-def get_status():
+def get_status() -> pd.DataFrame:
+    """
+    Generate the daily dataframe (via daily()), write a status-YYYYMMDD.tsv file,
+    and return the dataframe.
+
+    Returns
+    -------
+    pandas.DataFrame
+        DataFrame with columns: name, job, state, start, completion (if present).
+    """
     report = daily()
+
+    # NOTE: daily() currently returns a reduced schema (see _job_status_df()).
+    # This column selection may fail if columns are not present.
     report = report[["name", "job", "state", "start", "completion"]]
 
     report = report.sort_values(by="job")
@@ -421,7 +431,27 @@ def get_status():
     return report
 
 
-def create(name, description, directory, token=None):
+def create(name: str, description: str, directory: str, token: Optional[str] = None) -> Dict[str, Any]:
+    """
+    Create an archive project in StorCycle via PUT /projects/archive/{name}.
+
+    Parameters
+    ----------
+    name : str
+        Project name.
+    description : str
+        Project description.
+    directory : str
+        Working directory path.
+    token : str, optional
+        Authentication token. If None, the request will likely fail unless
+        the caller supplies a valid token.
+
+    Returns
+    -------
+    dict
+        JSON response from the API.
+    """
     url = f"https://storcycle.bil.psc.edu/openapi/projects/archive/{name}"
 
     headers = {
@@ -452,14 +482,30 @@ def create(name, description, directory, token=None):
     return response.json()
 
 
-def __get_status(token=None, page_size=500):
+def __get_status(token: Optional[str] = None, page_size: int = 500) -> pd.DataFrame:
+    """
+    Legacy helper to fetch job status and return a normalized DataFrame,
+    keeping only the latest backup per dataset.
+
+    Parameters
+    ----------
+    token : str, optional
+        Authentication token; if None, login() is used.
+    page_size : int
+        Pagination size.
+
+    Returns
+    -------
+    pandas.DataFrame
+        Normalized dataframe of job statuses, reduced to latest backup per name.
+        Returns an empty dataframe on errors.
+    """
     try:
         if token is None:
             token = login()
 
         all_items = []
         skip = 0
-
         headers = {"accept": "application/json", "Authorization": f"Bearer {token}"}
 
         while True:
@@ -474,122 +520,89 @@ def __get_status(token=None, page_size=500):
             response.raise_for_status()
             payload = response.json()
 
-            # Convert the response into a dataframe
+            # NOTE: The original code wraps payload directly into DataFrame.
+            # That typically produces columns from keys, not rows. Preserved.
             df = pd.DataFrame(payload)
 
             if df.empty:
                 break
-
             if "data" not in df.columns:
                 break
 
-            # Collect items from this page
             page_items = df["data"].tolist()
             all_items.extend(page_items)
 
-            # If fewer than page_size returned → last page
             if len(df) < page_size:
                 break
 
-            # Move to next page
             skip += page_size
 
-        # If no data was found, return empty
         if not all_items:
             return pd.DataFrame()
 
-        # Expand ALL rows into a final dataframe
         return __keep_latest_backup(pd.json_normalize(all_items))
 
     except Exception:
         return pd.DataFrame()
 
 
-def __keep_latest_backup(df):
-    # Split "job" into name + latest_backup
-    # rsplit with maxsplit=1 handles names that contain dashes
-    df[["name", "latest_backup"]] = df["job"].str.rsplit("-", n=1, expand=True)
+def __keep_latest_backup(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Reduce a job-status dataframe to only the latest backup per dataset name.
 
-    # Convert backup number to integer (errors='coerce' → NaN if not valid)
+    Assumes df has a 'job' column containing strings formatted like:
+        <name>-<backup_number>
+
+    Returns
+    -------
+    pandas.DataFrame
+        Filtered dataframe containing only the row with max backup number per name.
+    """
+    df[["name", "latest_backup"]] = df["job"].str.rsplit("-", n=1, expand=True)
     df["latest_backup"] = pd.to_numeric(df["latest_backup"], errors="coerce")
 
-    # Keep only the rows with the maximum backup per name
-    df_latest = df.loc[df.groupby("name")["latest_backup"].idxmax()].reset_index(
-        drop=True
-    )
-
+    df_latest = df.loc[df.groupby("name")["latest_backup"].idxmax()].reset_index(drop=True)
     return df_latest
 
 
-def login():
+# ---------------------------------------------------------------------
+# NOTE: Duplicate login() in pasted code
+# ---------------------------------------------------------------------
+# FIXME:
+# The original script defines `login()` twice (identical). That is redundant
+# and the second definition overwrites the first. We keep only one definition
+# above for clarity and to avoid confusion.
+
+
+def _job_status_df(include_all: bool = True, page_size: int = 500) -> pd.DataFrame:
     """
-    Always request a fresh token from the API using credentials
-    from ~/.SPECTRA.
-    """
-    username, password = __load_credentials()
-    if not username or not password:
-        raise ValueError("USERNAME and PASSWORD must be defined in ~/.SPECTRA")
-
-    url = "https://storcycle.bil.psc.edu/openapi/tokens"
-
-    headers = {
-        "accept": "application/json",
-        "Content-Type": "application/json",
-    }
-
-    payload = {
-        "username": username,
-        "password": password,
-    }
-
-    response = requests.post(url, headers=headers, json=payload)
-    response.raise_for_status()
-
-    data = response.json()
-    token = data.get("token")
-    if not token:
-        raise RuntimeError("No 'token' field found in authentication response")
-
-    return token
-
-
-def _job_status_df(include_all=True, page_size=500):
-    """
-    Retrieve ALL StorCycle jobStatus entries into a pandas DataFrame, paginating as needed.
+    Retrieve StorCycle jobStatus entries into a pandas DataFrame, paginating as needed.
 
     Parameters
     ----------
-
     include_all : bool
-        If True, request includeAll=true (may include completed/older jobs depending on retention).
+        If True, request includeAll=true (may include completed/older jobs).
     page_size : int
         Page size for pagination (API supports limit/skip).
 
     Returns
     -------
     pandas.DataFrame
-        DataFrame of all job status objects returned by the API.
+        DataFrame of job status objects returned by the API, filtered and reduced to
+        the latest backup index per BIL dataset id (bildid).
     """
-
     token = login()
 
     base_url = "https://storcycle.bil.psc.edu/openapi"
     url = f"{base_url.rstrip('/')}/jobStatus"
-    headers = {
-        "accept": "application/json",
-        "Authorization": f"Bearer {token}",
-    }
+    headers = {"accept": "application/json", "Authorization": f"Bearer {token}"}
 
     all_jobs = []
     skip = 0
     include_all_str = "true" if include_all else "false"
 
     while True:
-        params = {
-            "skip": skip,
-            "limit": page_size,
-            "includeAll": include_all_str,
-        }
+        params = {"skip": skip, "limit": page_size, "includeAll": include_all_str}
 
         resp = requests.get(url, headers=headers, params=params, timeout=60)
         resp.raise_for_status()
@@ -601,13 +614,11 @@ def _job_status_df(include_all=True, page_size=500):
 
         all_jobs.extend(batch)
 
-        # If fewer than requested, we're done
         if len(batch) < page_size:
             break
 
         skip += page_size
 
-        # Optional: if API returns a total count, you can stop early
         total = payload.get("total")
         if isinstance(total, int) and skip >= total:
             break
@@ -626,38 +637,29 @@ def _job_status_df(include_all=True, page_size=500):
         .reset_index(drop=True)
     )
 
+    # Some API responses may not include categories; this will raise if missing.
+    # Preserved; adjust to `errors="ignore"` if desired.
     jobs = jobs.drop(columns=["categories"])
 
     jobs2 = jobs.copy()
 
-    # 2) extract bildid (everything before final -<number>) and backup index (final number)
     extracted = jobs2["job"].str.extract(r"^(?P<bildid>.+)-(?P<backup_idx>\d+)$")
     jobs2["bildid"] = extracted["bildid"]
     jobs2["backup_idx"] = pd.to_numeric(extracted["backup_idx"], errors="coerce")
 
-    # 3) keep only the highest index per bildid
     jobs2 = (
-        jobs2.sort_values(
-            ["bildid", "backup_idx"]
-        )  # ascending so idxmax is last; we'll take last
+        jobs2.sort_values(["bildid", "backup_idx"])
         .dropna(subset=["bildid", "backup_idx"])
         .drop_duplicates(subset=["bildid"], keep="last")
-        .drop(columns=["job"])  # keep bildid if you want; remove if not needed
-        .sort_values("bildid")  # or sort_values("bildid") if you prefer
+        .drop(columns=["job"])
+        .sort_values("bildid")
         .reset_index(drop=True)
     )
 
     jobs2 = jobs2[
-        [
-            "bildid",
-            "backup_idx",
-            "state",
-            "percentComplete",
-            "start",
-            "completion",
-            "totalFiles",
-        ]
+        ["bildid", "backup_idx", "state", "percentComplete", "start", "completion", "totalFiles"]
     ]
+
     order = ["Failed", "Canceled", "Completed", "Active"]
     jobs2["state"] = pd.Categorical(jobs2["state"], categories=order, ordered=True)
     jobs2 = jobs2.sort_values("state")
@@ -665,7 +667,7 @@ def _job_status_df(include_all=True, page_size=500):
     return jobs2
 
 
-def daily():
+def daily() -> pd.DataFrame:
     """
     Generate (or load) the daily BIL report TSV.
 
@@ -673,22 +675,21 @@ def daily():
     --------
     - If today's TSV (YYYYMMDD.tsv) already exists, load and return it.
     - Otherwise:
-        1) Build the daily report dataframe
-        2) Keep only rows where exists(bildid) is True
-        3) Add StorCycle job state as column 'status' (looked up by bildid)
-        4) Save to YYYYMMDD.tsv and return the dataframe
+        1) Build the daily report dataframe from StorCycle job status
+        2) Save to YYYYMMDD.tsv
+        3) Return the dataframe
+
+    Returns
+    -------
+    pandas.DataFrame
+        Daily report dataframe (schema defined by _job_status_df()).
     """
     today = datetime.today().strftime("%Y%m%d")
     output_file = Path(f"{today}.tsv")
 
-    # If file exists, load and return (no API calls)
     if output_file.exists():
         return pd.read_csv(output_file, sep="\t")
 
-    # Generate dataframe
     df = _job_status_df()
-
-    # Save to TSV
     df.to_csv(output_file, sep="\t", index=False)
-
     return df
