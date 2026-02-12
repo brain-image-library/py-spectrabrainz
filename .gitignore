@@ -1,0 +1,103 @@
+# -----------------------------
+# Python bytecode / cache files
+# -----------------------------
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.pyc
+
+# C extensions
+*.so
+
+# -----------------------------
+# Virtual environments
+# -----------------------------
+venv/
+env/
+.venv/
+ENV/
+
+# -----------------------------
+# Python packaging
+# -----------------------------
+build/
+dist/
+*.egg-info/
+.eggs/
+*.egg
+
+# -----------------------------
+# Jupyter notebooks
+# -----------------------------
+.ipynb_checkpoints
+
+# -----------------------------
+# Logs and debug output
+# -----------------------------
+*.log
+*.out
+*.err
+
+# -----------------------------
+# Data files (do not commit)
+# -----------------------------
+data/
+*.csv
+*.tsv
+*.jsonl
+*.parquet
+*.pickle
+*.pkl
+*.h5
+*.hdf5
+*.db
+*.sqlite
+*.sqlite3
+*.bak
+*.tar
+*.gz
+*.zip
+
+# To ignore large raw data files in nested directories:
+**/raw/
+**/input/
+**/outputs/
+**/results/
+
+# -----------------------------
+# Secrets / credentials
+# -----------------------------
+*.env
+.env.*
+credentials.json
+secrets.json
+*.key
+*.pem
+*SPECTRA*
+# (Your ~/.SPECTRA file is outside the repo, but this prevents accidental copies)
+
+# -----------------------------
+# OS / editor files
+# -----------------------------
+.DS_Store
+Thumbs.db
+
+# -----------------------------
+# IDE / editor configuration
+# -----------------------------
+# PyCharm
+.idea/
+*.iml
+
+# VSCode
+.vscode/
+
+# -----------------------------
+# Test / coverage output
+# -----------------------------
+.cache/
+.coverage
+coverage.xml
+htmlcov/
+pytest_cache/
