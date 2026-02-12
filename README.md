@@ -1,6 +1,6 @@
 # SpectraBrainz (StorCycle → Daily TSV + Excel Report)
 
-![]('./images/image.png')
+![](./images/image.png)
 
 Utilities and scripts used by the **Pittsburgh Supercomputing Center (PSC)** / **Brain Image Library (BIL)** to query **Spectra Logic StorCycle** job status via the StorCycle OpenAPI endpoint and produce:
 
