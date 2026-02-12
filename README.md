@@ -48,7 +48,11 @@ Format:
 # StorCycle credentials for SpectraBrainz scripts
 USERNAME=your_username
 PASSWORD=your_password
+```
 
 ---
+Copyright © 2026 Pittsburgh Supercomputing Center. All Rights Reserved.
 
-© 2026 icaoberg  AT Pittsburgh Supercomputing Center (PSC), Brain Image Library (BIL). All rights reserved.
+The [Biomedical Applications Group](https://www.psc.edu/biomedical-applications/) at the [Pittsburgh Supercomputing
+Center](http://www.psc.edu) in the [Mellon College of Science](https://www.cmu.edu/mcs/) at [Carnegie Mellon University](http://www.cmu.edu).
+
