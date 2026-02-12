@@ -14,9 +14,9 @@ Utilities and scripts used by the **Pittsburgh Supercomputing Center (PSC)** / *
 ## Contents
 
 - `spectrabrainz.py` — Python module that authenticates to StorCycle, fetches `jobStatus`, and generates daily TSVs.
-- `spectrabrainz_daily.py` — thin wrapper that runs `spectrabrainz.daily()`.
-- `spectrabrainz_report_uploader.py` — builds/updates `spectrabrainz-report.xlsx` from `YYYYMMDD.tsv` files and uploads it via `rclone`.
-- `spectrabrainz_daily.sh` — example daily pipeline runner (generate → upload → rsync backups).
+- `daily.py` — thin wrapper that runs `spectrabrainz.daily()`.
+- `upload_to_gdrive.py` — builds/updates `spectrabrainz-report.xlsx` from `YYYYMMDD.tsv` files and uploads it via `rclone`.
+- `daily.sh` — example daily pipeline runner (generate → upload → rsync backups).
 
 > Filenames above reflect the “documented” versions shown in chat. If your repo uses different names, adjust accordingly.
 
