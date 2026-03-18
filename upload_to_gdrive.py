@@ -39,12 +39,17 @@ Notes:
     - Existing sheets with the same name will be replaced.
 """
 
+import io
 import re
 import subprocess
 from pathlib import Path
 
+import matplotlib
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
 import pandas as pd
 from openpyxl import load_workbook, Workbook
+from openpyxl.drawing.image import Image as XLImage
 from openpyxl.styles import PatternFill, Font
 from openpyxl.utils import get_column_letter
 
@@ -58,8 +63,8 @@ def find_tsv_files(base_dir: Path):
     """Return a sorted list of TSV files matching YYYYMMDD.tsv in base_dir."""
     pattern = re.compile(r"^\d{8}\.tsv$")
     return sorted(
-        f for f in base_dir.iterdir()
-        if f.is_file() and pattern.match(f.name)
+        (f for f in base_dir.iterdir() if f.is_file() and pattern.match(f.name)),
+        reverse=True,
     )
 
 
@@ -75,12 +80,11 @@ def write_excel_from_tsv(tsv_files, excel_path: Path):
         print(f"Creating new Excel file: {excel_path}")
         mode = "w"
 
-    with pd.ExcelWriter(
-        excel_path,
-        engine="openpyxl",
-        mode=mode,
-        if_sheet_exists="replace",
-    ) as writer:
+    writer_kwargs = dict(engine="openpyxl", mode=mode)
+    if mode == "a":
+        writer_kwargs["if_sheet_exists"] = "replace"
+
+    with pd.ExcelWriter(excel_path, **writer_kwargs) as writer:
         for tsv_file in tsv_files:
             sheet_name = tsv_file.stem
             print(f"Processing {tsv_file.name} → sheet '{sheet_name}'")
@@ -191,6 +195,89 @@ def apply_backup_status_formatting(excel_path: Path, sheet_names):
 
 
 # -----------------------------------------------------------
+# State histogram chart sheet
+# -----------------------------------------------------------
+HIST_SHEET = "Histogram of states"
+_KNOWN_STATES = ("Completed", "Failed", "Canceled")
+_STATE_COLORS = {
+    "Completed": "#228B22",
+    "Failed":    "#B22222",
+    "Canceled":  "#FFD700",
+    "Queued":    "#808080",
+}
+
+
+def _count_states(ws):
+    """Return a dict of state -> count for a worksheet, treating unknown/null as Queued."""
+    counts = {s: 0 for s in (*_KNOWN_STATES, "Queued")}
+    state_col = None
+    for col in range(1, ws.max_column + 1):
+        if ws.cell(row=1, column=col).value == "state":
+            state_col = col
+            break
+
+    for row in range(2, ws.max_row + 1):
+        val = ws.cell(row=row, column=state_col).value if state_col else None
+        if val in _KNOWN_STATES:
+            counts[val] += 1
+        else:
+            counts["Queued"] += 1
+
+    return counts
+
+
+def add_histogram_sheet(excel_path: Path, sheet_names):
+    """Build a stacked bar chart of states per day and embed it as the first sheet."""
+    print(f"Building '{HIST_SHEET}'...")
+
+    wb = load_workbook(excel_path)
+
+    # Collect counts; chart shows dates in ascending (chronological) order
+    labels = list(reversed(sheet_names))
+    state_data = {s: [] for s in (*_KNOWN_STATES, "Queued")}
+    for name in labels:
+        counts = _count_states(wb[name]) if name in wb.sheetnames else {s: 0 for s in state_data}
+        for s in state_data:
+            state_data[s].append(counts[s])
+
+    # Build the stacked bar chart
+    x = range(len(labels))
+    fig, ax = plt.subplots(figsize=(max(10, len(labels) * 1.4), 6))
+
+    bottoms = [0] * len(labels)
+    for state in (*_KNOWN_STATES, "Queued"):
+        vals = state_data[state]
+        ax.bar(x, vals, bottom=bottoms, label=state, color=_STATE_COLORS[state])
+        bottoms = [b + v for b, v in zip(bottoms, vals)]
+
+    ax.set_xticks(list(x))
+    ax.set_xticklabels(labels, rotation=45, ha="right")
+    ax.set_xlabel("Date")
+    ax.set_ylabel("Count")
+    ax.set_title("Histogram of States per Day")
+    ax.legend()
+    plt.tight_layout()
+
+    buf = io.BytesIO()
+    fig.savefig(buf, format="png", dpi=150)
+    buf.seek(0)
+    plt.close(fig)
+
+    # Remove existing histogram sheet if present
+    if HIST_SHEET in wb.sheetnames:
+        del wb[HIST_SHEET]
+
+    ws_hist = wb.create_sheet(HIST_SHEET)
+    ws_hist.add_image(XLImage(buf), "A1")
+
+    # Move to first position
+    wb.move_sheet(HIST_SHEET, offset=-(len(wb.sheetnames) - 1))
+
+    wb.save(excel_path)
+    print(f"Sheet '{HIST_SHEET}' added as first sheet.")
+
+
+# -----------------------------------------------------------
 # rclone upload
 # -----------------------------------------------------------
 def upload_with_rclone(excel_path: Path, remote_path: str):
@@ -225,6 +312,7 @@ def main():
 
     write_excel_from_tsv(tsv_files, excel_path)
     apply_backup_status_formatting(excel_path, sheet_names)
+    add_histogram_sheet(excel_path, sheet_names)
     upload_with_rclone(excel_path, RCLONE_REMOTE_PATH)
 
 

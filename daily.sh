@@ -33,15 +33,30 @@
 set -euo pipefail
 
 # Run daily data processing
-python ./daily.py
+/bil/users/icaoberg/miniconda3/bin/python ./daily.py
 
 # Upload results to Google Drive
-python ./upload_to_gdrive.py
+/bil/users/icaoberg/miniconda3/bin/python ./upload_to_gdrive.py
 
-# Backup all TSV files matching the 2026*tsv pattern
-rsync -ruv 2026*tsv /bil/users/icaoberg/backups/spectranbrainz/
+# Backup all TSV files matching the 2026*tsv pattern (compressed)
+for f in 2026*tsv; do
+    tar -czf "${f}.tar.gz" "$f"
+done
+rsync -ruv 2026*tsv.tar.gz /bil/users/icaoberg/backups/spectranbrainz/
+rm -f 2026*tsv.tar.gz
 
-# Backup the Excel report
-rsync -ruv spectrabrainz-report.xlsx /bil/users/icaoberg/backups/spectranbrainz/
+# Backup the Excel report (compressed)
+tar -czf spectrabrainz-report.xlsx.tar.gz spectrabrainz-report.xlsx
+rsync -ruv spectrabrainz-report.xlsx.tar.gz /bil/users/icaoberg/backups/spectranbrainz/
+rm -f spectrabrainz-report.xlsx.tar.gz
+
+# On the last day of the month, copy the report with a YYYYMM-stamped filename and remove the original
+today=$(date +%d)
+last_day=$(date -d "$(date +%Y-%m-01) +1 month -1 day" +%d)
+if [ "$today" -eq "$last_day" ]; then
+    stamp=$(date +%Y%m)
+    cp spectrabrainz-report.xlsx "spectrabrainz-report.${stamp}.xlsx"
+    rm spectrabrainz-report.xlsx
+fi
 
 echo "SpectraBrainz daily pipeline completed successfully."

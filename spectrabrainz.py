@@ -647,6 +647,9 @@ def _job_status_df(include_all: bool = True, page_size: int = 500) -> pd.DataFra
     jobs2["bildid"] = extracted["bildid"]
     jobs2["backup_idx"] = pd.to_numeric(extracted["backup_idx"], errors="coerce")
 
+    get_working_directory = lambda bildid: (get(bildid) or {}).get('workingDirectory')
+    jobs2['directory'] = jobs2['bildid'].parallel_apply(get_working_directory)
+
     jobs2 = (
         jobs2.sort_values(["bildid", "backup_idx"])
         .dropna(subset=["bildid", "backup_idx"])
@@ -657,7 +660,7 @@ def _job_status_df(include_all: bool = True, page_size: int = 500) -> pd.DataFra
     )
 
     jobs2 = jobs2[
-        ["bildid", "backup_idx", "state", "percentComplete", "start", "completion", "totalFiles"]
+        ["bildid", "backup_idx", "state", "percentComplete", "start", "completion", "totalFiles", "directory"]
     ]
 
     order = ["Failed", "Canceled", "Completed", "Active"]
@@ -693,3 +696,36 @@ def daily() -> pd.DataFrame:
     df = _job_status_df()
     df.to_csv(output_file, sep="\t", index=False)
     return df
+
+def scan(name: str, description: str, directory: str, token: Optional[str] = None) -> Dict[str, Any]:
+    safe_name = quote(name, safe="")  # encode everything that could break the path
+    url = f"https://storcycle.bil.psc.edu/openapi/projects/archive/{safe_name}"
+
+    headers = {"Content-Type": "application/json"}
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+
+    payload = {
+        "description": description,
+        "share": "BIL Published Data",
+        "projectType": "Scan",
+        "workingDirectory": directory,
+        "targets": ["BIL Published Data on Tape"],
+        "active": True,
+        "enabled": True,
+        "breadCrumbAction": "KeepOriginal",
+        "delayedActionDays": 0,
+        "filter": {
+            "minimumAge": "AnyAge",
+            "customAgeInDays": 0,
+            "minimumSize": "Any",
+        },
+        "schedule": {"period": "Now"},
+    }
+
+    r = requests.put(url, headers=headers, json=payload, timeout=30)
+    # If it fails, this often includes a useful body with validation errors:
+    if not r.ok:
+        raise requests.HTTPError(f"{r.status_code} {r.reason}: {r.text}", response=r)
+
+    return r.json()

@@ -48,6 +48,7 @@ data/
 *.jsonl
 *.parquet
 *.pickle
+*.xlsx
 *.pkl
 *.h5
 *.hdf5
