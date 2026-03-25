@@ -20,7 +20,7 @@
 # Requirements:
 #   - Bash
 #   - Python available in PATH
-#   - daily.py and upload_to_gdrive.py in the same directory
+#   - daily.py in the same directory; upload_to_gdrive.py in scripts/
 #   - rsync available
 #   - Write access to /bil/users/icaoberg/backups/spectranbrainz/
 #
@@ -36,14 +36,14 @@ set -euo pipefail
 /bil/users/icaoberg/miniconda3/bin/python ./daily.py
 
 # Upload results to Google Drive
-/bil/users/icaoberg/miniconda3/bin/python ./upload_to_gdrive.py
+/bil/users/icaoberg/miniconda3/bin/python ./scripts/upload_to_gdrive.py
 
 # Backup all TSV files matching the 2026*tsv pattern (compressed)
-for f in 2026*tsv; do
+for f in data/2026*tsv; do
     tar -czf "${f}.tar.gz" "$f"
 done
-rsync -ruv 2026*tsv.tar.gz /bil/users/icaoberg/backups/spectranbrainz/
-rm -f 2026*tsv.tar.gz
+rsync -ruv data/2026*tsv.tar.gz /bil/users/icaoberg/backups/spectranbrainz/
+rm -f data/2026*tsv.tar.gz
 
 # Backup the Excel report (compressed)
 tar -czf spectrabrainz-report.xlsx.tar.gz spectrabrainz-report.xlsx

@@ -426,7 +426,7 @@ def get_status() -> pd.DataFrame:
 
     report = report.sort_values(by="job")
     today = date.today().strftime("%Y%m%d")
-    outfile = f"status-{today}.tsv"
+    outfile = Path("data") / f"status-{today}.tsv"
     report.to_csv(outfile, sep="\t", index=False)
     return report
 
@@ -477,7 +477,7 @@ def create(name: str, description: str, directory: str, token: Optional[str] = N
         "schedule": {"period": "Now"},
     }
 
-    response = requests.put(url, headers=headers, json=payload)
+    response = requests.put(url, headers=headers, json=payload, timeout=30)
     response.raise_for_status()
     return response.json()
 
@@ -650,6 +650,9 @@ def _job_status_df(include_all: bool = True, page_size: int = 500) -> pd.DataFra
     get_working_directory = lambda bildid: (get(bildid) or {}).get('workingDirectory')
     jobs2['directory'] = jobs2['bildid'].parallel_apply(get_working_directory)
 
+    get_size = lambda bildid: (brainimagelibrary.inventory.get(bildid) or {}).get('size')
+    jobs2['size'] = jobs2['bildid'].parallel_apply(get_size)
+
     jobs2 = (
         jobs2.sort_values(["bildid", "backup_idx"])
         .dropna(subset=["bildid", "backup_idx"])
@@ -660,12 +663,18 @@ def _job_status_df(include_all: bool = True, page_size: int = 500) -> pd.DataFra
     )
 
     jobs2 = jobs2[
-        ["bildid", "backup_idx", "state", "percentComplete", "start", "completion", "totalFiles", "directory"]
+        ["bildid", "backup_idx", "state", "percentComplete", "start", "completion", "totalFiles", "directory", "size"]
     ]
 
     order = ["Failed", "Canceled", "Completed", "Active"]
     jobs2["state"] = pd.Categorical(jobs2["state"], categories=order, ordered=True)
     jobs2 = jobs2.sort_values("state")
+
+    total_size_tb = pd.to_numeric(jobs2["size"], errors="coerce").sum() / 1e12
+    total_row = pd.DataFrame([{col: None for col in jobs2.columns}])
+    total_row["bildid"] = "TOTAL"
+    total_row["size"] = total_size_tb
+    jobs2 = pd.concat([jobs2, total_row], ignore_index=True)
 
     return jobs2
 
@@ -688,7 +697,7 @@ def daily() -> pd.DataFrame:
         Daily report dataframe (schema defined by _job_status_df()).
     """
     today = datetime.today().strftime("%Y%m%d")
-    output_file = Path(f"{today}.tsv")
+    output_file = Path("data") / f"{today}.tsv"
 
     if output_file.exists():
         return pd.read_csv(output_file, sep="\t")
@@ -697,19 +706,45 @@ def daily() -> pd.DataFrame:
     df.to_csv(output_file, sep="\t", index=False)
     return df
 
-def scan(name: str, description: str, directory: str, token: Optional[str] = None) -> Dict[str, Any]:
-    safe_name = quote(name, safe="")  # encode everything that could break the path
-    url = f"https://storcycle.bil.psc.edu/openapi/projects/archive/{safe_name}"
+def scan(name: str, token: Optional[str] = None) -> Dict[str, Any]:
+    """
+    Create or update a Scan-only project in StorCycle via PUT /projects/archive/{name}.
 
-    headers = {"Content-Type": "application/json"}
-    if token:
-        headers["Authorization"] = f"Bearer {token}"
+    Unlike ``create()``, this sets ``projectType`` to ``"Scan"`` without archiving
+    to tape.  Useful for inventorying a dataset before committing to a full
+    ScanAndArchive run.
+
+    Parameters
+    ----------
+    name : str
+        Project name (dataset ID).
+    token : str, optional
+        Authentication token. If not provided, ``login()`` is used.
+
+    Returns
+    -------
+    dict
+        JSON response from the API.
+
+    Raises
+    ------
+    requests.HTTPError
+        If the API returns a non-2xx HTTP status code. The error message
+        includes the response body to aid debugging.
+    """
+    if token is None:
+        token = login()
+
+    url = f"https://storcycle.bil.psc.edu/openapi/projects/archive/{name}"
+
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "Content-Type": "application/json",
+    }
 
     payload = {
-        "description": description,
         "share": "BIL Published Data",
         "projectType": "Scan",
-        "workingDirectory": directory,
         "targets": ["BIL Published Data on Tape"],
         "active": True,
         "enabled": True,
@@ -725,6 +760,99 @@ def scan(name: str, description: str, directory: str, token: Optional[str] = Non
 
     r = requests.put(url, headers=headers, json=payload, timeout=30)
     # If it fails, this often includes a useful body with validation errors:
+    if not r.ok:
+        raise requests.HTTPError(f"{r.status_code} {r.reason}: {r.text}", response=r)
+
+    return r.json()
+
+
+def get_size(name: str, token: Optional[str] = None) -> Optional[int]:
+    """
+    Return the totalSize (in bytes) for a project's latest job from the StorCycle API.
+
+    Parameters
+    ----------
+    name : str
+        Project name (dataset ID).
+    token : str, optional
+        Authentication token. If omitted, login() is used.
+
+    Returns
+    -------
+    int or None
+        Value of categories.totalSize from the latest job, or None if not available.
+    """
+    if token is None:
+        token = login()
+
+    headers = {"accept": "application/json", "Authorization": f"Bearer {token}"}
+    params = {
+        "skip": 0,
+        "limit": 500,
+        "includeAll": "true",
+        "sortBy": "name",
+        "filterBy": "ScanAndArchive",
+    }
+
+    resp = requests.get(
+        "https://storcycle.bil.psc.edu/openapi/jobStatus",
+        headers=headers,
+        params=params,
+        timeout=60,
+    )
+    resp.raise_for_status()
+
+    data = resp.json().get("data", [])
+    matches = [item for item in data if item.get("job", "").startswith(f"{name}-")]
+
+    if not matches:
+        return None
+
+    latest = max(matches, key=lambda x: x.get("job", ""))
+    return latest.get("categories", {}).get("totalSize") if latest.get("categories") else None
+
+
+def run(name: str, token: Optional[str] = None) -> Dict[str, Any]:
+    """
+    Trigger an immediate backup run for an existing StorCycle project.
+
+    Parameters
+    ----------
+    name : str
+        Project name (dataset ID) that already exists in StorCycle.
+    token : str, optional
+        Authentication token. If not provided, login() is used.
+
+    Returns
+    -------
+    dict
+        JSON response from the API.
+
+    Raises
+    ------
+    ValueError
+        If the project does not exist.
+    requests.HTTPError
+        If the API returns a non-2xx HTTP status code.
+    """
+    if token is None:
+        token = login()
+
+    if not exists(name, token=token):
+        raise ValueError(f"Project '{name}' does not exist in StorCycle.")
+
+    project = get(name, token=token)
+
+    url = f"https://storcycle.bil.psc.edu/openapi/projects/archive/{name}"
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "Content-Type": "application/json",
+    }
+    project.pop("failFast", None)
+    project.pop("criteria", None)
+    payload = {**project, "schedule": {"period": "Now"}}
+
+    r = requests.put(url, headers=headers, json=payload, timeout=30)
     if not r.ok:
         raise requests.HTTPError(f"{r.status_code} {r.reason}: {r.text}", response=r)
 

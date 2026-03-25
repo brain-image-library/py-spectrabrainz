@@ -42,7 +42,6 @@ dist/
 # -----------------------------
 # Data files (do not commit)
 # -----------------------------
-data/
 *.csv
 *.tsv
 *.jsonl
