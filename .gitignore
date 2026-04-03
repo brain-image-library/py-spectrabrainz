@@ -60,6 +60,7 @@ dist/
 *.zip
 
 # To ignore large raw data files in nested directories:
+**/data/
 **/raw/
 **/input/
 **/outputs/
