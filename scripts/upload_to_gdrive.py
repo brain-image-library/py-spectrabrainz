@@ -303,7 +303,7 @@ def main():
     cwd = Path(".").resolve()
     excel_path = cwd / "spectrabrainz-report.xlsx"
 
-    tsv_files = find_tsv_files(cwd)
+    tsv_files = find_tsv_files(cwd / "data")
     if not tsv_files:
         print("No YYYYMMDD.tsv files found.")
         return
